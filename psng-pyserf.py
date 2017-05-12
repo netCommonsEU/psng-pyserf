@@ -6,6 +6,7 @@ import base64
 import bz2
 from pyroute2 import IPRoute
 import portalocker
+import time
 
 
 class PsngSerfClient:
@@ -53,29 +54,45 @@ class PsngSerfClient:
     def get_members(self):
         # Retrieve informations from all the serf memebrs.
         # This is done through the RPC members call.
-        client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
-        client.connect()
-        client.members()
-        resp = client.request(timeout=5)
-        client.disconnect()
+
+        resp = None
+
+        try:
+            client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
+            client.connect()
+            client.members()
+            resp = client.request(timeout=5)
+            client.disconnect()
+        except serf._exceptions.ConnectionError:
+            print "Connection error"
 
         return resp
 
     def set_tag(self, tag_dict):
-        client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
-        client.connect()
-        client.tags(Tags=tag_dict)
-        resp = client.request()
-        client.disconnect()
+        resp = None
+
+        try:
+            client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
+            client.connect()
+            client.tags(Tags=tag_dict)
+            resp = client.request()
+            client.disconnect()
+        except serf._exceptions.ConnectionError:
+            print "Connection error"
 
         return resp
 
     def del_tag(self, tag_names_list):
-        client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
-        client.connect()
-        client.tags(DeleteTags=tag_names_list)
-        resp = client.request()
-        client.disconnect()
+        resp = None
+
+        try:
+            client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
+            client.connect()
+            client.tags(DeleteTags=tag_names_list)
+            resp = client.request()
+            client.disconnect()
+        except serf._exceptions.ConnectionError:
+            print "Connection error"
 
         return resp
 
@@ -129,30 +146,49 @@ class PsngSerfClient:
     def listen_for_member_update_events(self, ch_dbfile):
         print "Database file: %s" % (ch_dbfile,)
 
-        # Write the db file based on the current members channels tags
-        self.client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port),
-                                  auto_reconnect=True)
-        self.client.connect()
+        while True:
 
-        self.ch_dbfile = ch_dbfile
-        self.update_db_from_members()
+            # Write the db file based on the current members channels tags
+            members_updated = False
+            sleep_time = 5
 
-        try:
-            # Register callback for memebr update events
-            # Todo: handle sigint
-            self.client.stream(Type="*").add_callback(
-                               self.member_update_event_callback).request(
-                               watch=True)
-        except KeyboardInterrupt:
-            print "Disconnection from RPC deamon"
-            self.client.disconnect()
+            self.client = serf.Client("%s:%d" % (self.rpc_address,
+                                      self.rpc_port),
+                                      auto_reconnect=True)
+
+            while not members_updated:
+                try:
+                    self.client.connect()
+
+                    self.ch_dbfile = ch_dbfile
+                    if self.update_db_from_members():
+                        members_updated = True
+                    else:
+                        time.sleep(sleep_time)
+                except serf._exceptions.ConnectionError:
+                    print "Client connection error (sleep %d)" % (sleep_time,)
+                    time.sleep(sleep_time)
+
+            try:
+                # Register callback for memebr update events
+                # Todo: handle sigint
+                self.client.stream(Type="member-update").add_callback(
+                                   self.member_update_event_callback).request(
+                                   timeout=120)
+            except serf._exceptions.ConnectionError:
+                print "Client connection error (sleep %d)" % (sleep_time,)
+                time.sleep(sleep_time)
+            except KeyboardInterrupt:
+                print "Disconnection from RPC deamon"
+                self.client.disconnect()
+                return
 
     def update_db_from_members(self):
         # WARNING: This method assumes the connection towards the RPC deamon
         # is already open and the client seved in self.client
 
         if not self.client:
-            return
+            return False
 
         # Retrieve serf members
         self.client.members()
@@ -189,13 +225,19 @@ class PsngSerfClient:
             # Write database file
             self.write_db_file(self.ch_dbfile, channels_list)
 
+            return True
+
         else:
+            self.write_db_file(self.ch_dbfile, [])
             sys.stderr.write("Serf members command failed\n")
             sys.stderr.write("%s" % (resp[0].error,))
-            return
+            return False
 
     def delete_channel(self, ch_addr, ch_port):
         resp = self.get_members()
+
+        if not resp:
+            return
 
         if resp[0].is_success:
             resp_body = resp[0].body
@@ -258,6 +300,9 @@ class PsngSerfClient:
 
                 resp = self.set_tag({self.tag_name: ch_str_comp})
 
+                if not resp:
+                    return
+
                 if not resp[0].is_success:
                     sys.stderr.write("Serf tags set command failed\n")
                     sys.stderr.write("%s" % (resp[0].error,))
@@ -269,6 +314,9 @@ class PsngSerfClient:
                 print "Delete tag: %s" % (self.tag_name,)
 
                 resp = self.del_tag((self.tag_name,))
+
+                if not resp:
+                    return
 
                 if not resp[0].is_success:
                     sys.stderr.write("Serf tags delete command failed\n")
@@ -286,6 +334,9 @@ class PsngSerfClient:
 
         # Retrieve informations from all the serf memebrs.
         resp = self.get_members()
+
+        if not resp:
+            return
 
         if resp[0].is_success:
             resp_body = resp[0].body
@@ -350,6 +401,9 @@ class PsngSerfClient:
             # Update (or add) the channels tag.
             # This is done through the RCP tags call
             resp = self.set_tag({self.tag_name: ch_str_comp})
+
+            if not resp:
+                return
 
             if not resp[0].is_success:
                 sys.stderr.write("Serf tags command failed\n")
