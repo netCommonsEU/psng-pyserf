@@ -3,8 +3,9 @@
 This software requires the following libraries:
 
 argparse_actions
-iproute2
+pyroute2
 portalocker
+serf-python
 
 
 ### Usage examples

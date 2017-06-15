@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import argparse
 import argparse_actions
 import serf
@@ -110,7 +112,8 @@ class PsngSerfClient:
 
     def write_db_file(self, file_name, channels_list):
 
-        file_hdr = "# channel_name,source_addr,source_port,channel_params"
+        file_hdr = "# channel_name,source_addr,source_port," \
+                   "channel_params,sdp_uri"
 
         db_file = open(file_name, 'w')
         portalocker.lock(db_file, portalocker.LOCK_EX)
@@ -273,7 +276,7 @@ class PsngSerfClient:
                 channels_list = channels.split(";")
 
                 for c in channels_list:
-                    [_, caddr, cport, _] = c.split(",")
+                    [_, caddr, cport, _, _] = c.split(",")
 
                     if (caddr != ch_addr or int(cport) != int(ch_port)):
                         # This is not the channel we want to delete.
@@ -327,9 +330,10 @@ class PsngSerfClient:
             sys.stderr.write("%s" % (resp[0].error,))
             return
 
-    def set_new_channel(self, ch_addr, ch_port, ch_name, ch_txt):
+    def set_new_channel(self, ch_addr, ch_port, ch_name, ch_txt, ch_sdpuri):
         # Build new channel string
-        ch_str = '%s,%s,%d,%s' % (ch_name, ch_addr, ch_port, ch_txt)
+        ch_str = '%s,%s,%d,%s,%s' % (ch_name, ch_addr, ch_port,
+                                     ch_txt, ch_sdpuri)
         print "Add channel: %s\n" % (ch_str,)
 
         # Retrieve informations from all the serf memebrs.
@@ -383,7 +387,7 @@ class PsngSerfClient:
                 channels_list = channels.split(";")
 
                 for c in channels_list:
-                    [_, caddr, cport, _] = c.split(",")
+                    [_, caddr, cport, _, _] = c.split(",")
 
                     if (caddr == ch_addr and int(cport) == int(ch_port)):
                         print "Channel already exists"
@@ -459,6 +463,8 @@ def psng_serf_client_init():
                             help="Source channel name")
     parser_set.add_argument("ctxt", type=str,
                             help="Source channel additional parameters")
+    parser_set.add_argument("csdpuri", type=str,
+                            help="SDP URI of the channel")
 
     # Delete PeerStreamer Next-Generation source tag
     parser_del = subparsers.add_parser("del", help="Delete a channel "
@@ -503,7 +509,9 @@ def psng_serf_client_init():
             ch_port = args.cport
             ch_name = args.cname
             ch_txt = args.ctxt
-            serf_client.set_new_channel(ch_addr, ch_port, ch_name, ch_txt)
+            ch_sdpuri = args.csdpuri
+            serf_client.set_new_channel(ch_addr, ch_port, ch_name,
+                                        ch_txt, ch_sdpuri)
         elif command == "del":
             ch_addr = args.caddr
             ch_port = args.cport
