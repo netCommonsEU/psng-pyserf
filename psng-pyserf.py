@@ -140,6 +140,9 @@ class PsngSerfClient:
                             if c_tag not in self.last_channels_tags_list:
                                 self.update_db_from_members()
                                 return 0
+
+            if self.last_channels_tags_list:
+                self.update_db_from_members()
         else:
             sys.stderr.write("Serf streamed event failed\n")
             sys.stderr.write("%s" % (resp.error,))
@@ -149,10 +152,10 @@ class PsngSerfClient:
     def listen_for_member_update_events(self, ch_dbfile):
         print "Database file: %s" % (ch_dbfile,)
 
+        members_updated = False
         while True:
 
             # Write the db file based on the current members channels tags
-            members_updated = False
             sleep_time = 5
 
             self.client = serf.Client("%s:%d" % (self.rpc_address,
@@ -178,6 +181,8 @@ class PsngSerfClient:
                 self.client.stream(Type="member-update").add_callback(
                                    self.member_update_event_callback).request(
                                    timeout=120)
+                self.client.disconnect()
+                members_updated = False
             except serf._exceptions.ConnectionError:
                 print "Client connection error (sleep %d)" % (sleep_time,)
                 time.sleep(sleep_time)
