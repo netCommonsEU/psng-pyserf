@@ -3,6 +3,22 @@
 This software requires the following libraries: argparse\_actions, pyroute2,
 portalocker, serf-python.
 
+For installing argparse\_actions, pyroute2, portalocker executes:
+
+```bash
+pip install argparse\_actions, pyroute2, portalocker
+```
+
+For installing serf-python, executes:
+
+```bash
+git clone https://github.com/spikeekips/serf-python.git
+git checkout 6feec505ce98e53c97b9edbabe2b7e3d99fbe4fc
+cd serf-python
+python setup.py install
+```
+
+
 # Usage examples
 
 In all the examples that follow we assume we want to use "psngc" as the channels
@@ -16,7 +32,7 @@ address and port are 192.168.100.2 and 6000 respectively. Then you execute the
 following command:
 
 ```
-python psng-pyserf.py -t psngc -a 127.0.0.1 -p 7373 set 192.168.100.2 6000 "Channel1" "Reserved"
+python psng-pyserf.py -t psngc -a 127.0.0.1 -p 7373 set 192.168.100.2 6000 "Channel1" "Reserved" http://192.168.100.2:8080/video.sdp
 ```
 
 The last string "Reserved" can be used to specify any additional parameters that
