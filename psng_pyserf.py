@@ -42,6 +42,44 @@ import portalocker
 import time
 
 
+class Channel:
+    def __init__(self, name, ipaddr, port, quality, sdpuri):
+        self.ipaddr = ipaddr
+        self.port = port
+        self.name = name
+        self.quality = quality
+        self.sdpuri = sdpuri
+
+    def __str__(self):
+        return self.name + "," + self.ipaddr + "," + self.port + "," + \
+            self.quality + "," + self.sdpuri
+
+    def __hash__(self):
+        return hash(self.ipaddr + self.port + self.name)
+
+    def __eq__(self, src):
+        return self.ipaddr == src.ipaddr and \
+            self.port == src.port and \
+            self.name == src.name
+
+    def __ne__(self, src):
+        return not self.__eq__(src)
+
+    @classmethod
+    def channel_from_file(cls, filedb):
+        res = set()
+        db_file = open(filedb, 'r')
+        portalocker.lock(db_file, portalocker.LOCK_EX)
+        for line in db_file:
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                tokens = line.split(',')
+                res.add(Channel(tokens[0], tokens[1], tokens[2], tokens[3],
+                                tokens[4]))
+        db_file.close()
+        return res
+
+
 class PsngSerfClient:
 
     def __init__(self, tag_name, rpc_address, rpc_port):
@@ -52,6 +90,7 @@ class PsngSerfClient:
         self.client = None
         # Remember all tags parsed the last time
         self.last_channels_tags_list = []
+        self.local_sources = set()
 
     def encode_and_compress(self, s):
         ret_data = base64.b64encode(s)
@@ -150,13 +189,12 @@ class PsngSerfClient:
         portalocker.lock(db_file, portalocker.LOCK_EX)
         db_file.write("%s\n" % (file_hdr,))
         for c in channels_list:
-            print "Add channel: %s" % (c,)
+            print "Add channel to db: %s" % (c,)
             db_file.write("%s\n" % (c,))
 
         db_file.close()
 
     def member_update_event_callback(self, resp):
-
         if resp.is_success:
             print "Received event: member-update"
             resp_body = resp.body
@@ -180,8 +218,23 @@ class PsngSerfClient:
 
         return 0
 
-    def listen_for_member_update_events(self, ch_dbfile):
-        print "Database file: %s" % (ch_dbfile,)
+    def broadcast_local_sources(self, src_dbfile):
+        current = Channel.channel_from_file(src_dbfile)
+
+        # new channels not broadcasted
+        for ch in current - self.local_sources:
+            self.set_new_channel(ch.ipaddr, int(ch.port), ch.name, ch.quality,
+                                 ch.sdpuri)
+
+        # local sources not available anymore
+        for ch in self.local_sources - current:
+            self.delete_channel(ch.ipaddr, ch.port)
+
+        self.local_sources = current
+
+    def channels_sources_periodic_update(self, ch_dbfile, source_dbfile):
+        print "Available channel file: %s" % (ch_dbfile,)
+        print "Broadcasted source channel file: %s" % (source_dbfile,)
 
         members_updated = False
         while True:
@@ -198,6 +251,7 @@ class PsngSerfClient:
                     self.client.connect()
 
                     self.ch_dbfile = ch_dbfile
+                    self.broadcast_local_sources(source_dbfile)
                     if self.update_db_from_members():
                         members_updated = True
                     else:
@@ -211,7 +265,7 @@ class PsngSerfClient:
                 # Todo: handle sigint
                 self.client.stream(Type="member-update").add_callback(
                                    self.member_update_event_callback).request(
-                                   timeout=120)
+                                   timeout=3)
                 self.client.disconnect()
                 members_updated = False
             except serf._exceptions.ConnectionError:
@@ -525,6 +579,8 @@ def psng_serf_client_init():
                                       "member-update Serf events.")
     parser_db.add_argument("dbfile", type=str,
                            help="Channels database file")
+    parser_db.add_argument("src_dbfile", type=str,
+                           help="Local source database file")
 
     try:
         args = parser.parse_args()
@@ -539,7 +595,9 @@ def psng_serf_client_init():
         command = args.command
         if command == "bg":
             ch_dbfile = args.dbfile
-            serf_client.listen_for_member_update_events(ch_dbfile)
+            source_dbfile = args.src_dbfile
+            serf_client.channels_sources_periodic_update(ch_dbfile,
+                                                         source_dbfile)
         elif command == "set":
             ch_addr = args.caddr
             ch_port = args.cport
