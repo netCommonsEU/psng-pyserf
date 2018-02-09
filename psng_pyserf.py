@@ -68,15 +68,19 @@ class Channel:
     @classmethod
     def channel_from_file(cls, filedb):
         res = set()
-        db_file = open(filedb, 'r')
-        portalocker.lock(db_file, portalocker.LOCK_EX)
-        for line in db_file:
-            line = line.strip()
-            if len(line) > 0 and line[0] != "#":
-                tokens = line.split(',')
-                res.add(Channel(tokens[0], tokens[1], tokens[2], tokens[3],
-                                tokens[4]))
-        db_file.close()
+        try:
+            db_file = open(filedb, 'r')
+            portalocker.lock(db_file, portalocker.LOCK_EX)
+            for line in db_file:
+                line = line.strip()
+                if len(line) > 0 and line[0] != "#":
+                    tokens = line.split(',')
+                    res.add(Channel(tokens[0], tokens[1], tokens[2], tokens[3],
+                                    tokens[4]))
+            db_file.close()
+        except IOError:
+            sys.stderr.write("Local source database not found...\n")
+
         return res
 
 
