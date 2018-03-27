@@ -35,14 +35,10 @@ import argparse
 import argparse_actions
 import serf
 import sys
-import base64
-import bz2
-from pyroute2 import IPRoute
 import portalocker
-import time
 
 
-class Channel:
+class Channel(object):
     def __init__(self, name, ipaddr, port, quality, sdpuri):
         self.ipaddr = ipaddr
         self.port = port
@@ -51,8 +47,11 @@ class Channel:
         self.sdpuri = sdpuri
 
     def __str__(self):
-        return self.name + "," + self.ipaddr + "," + self.port + "," + \
+        return self.name + "," + self.ipaddr + "," + str(self.port) + "," + \
             self.quality + "," + self.sdpuri
+
+    def to_tuple(self):
+        return (self.ipaddr, self.port, self.name, self.quality, self.sdpuri)
 
     def __hash__(self):
         return hash(self.ipaddr + self.port + self.name)
@@ -84,456 +83,54 @@ class Channel:
         return res
 
 
-class PsngSerfClient:
+class PSngSerfClient(object):
+    def __init__(self, rpc_addr, rpc_port):
+        self.serf_client = serf.Client(rpc_addr + ":" + str(rpc_port))
+        self.serf_client.handshake().request()
+        self._psng_event = "PSng-channel"
 
-    def __init__(self, tag_name, rpc_address, rpc_port):
-        self.tag_name = tag_name
-        self.rpc_address = rpc_address
-        self.rpc_port = rpc_port
-        self.ch_dbfile = None
-        self.client = None
-        # Remember all tags parsed the last time
-        self.last_channels_tags_list = []
-        self.local_sources = set()
+    def broadcast_channel(self, addr, port, name, txt, sdp):
+        c = Channel(name, addr, port, txt, sdp)
+        self.serf_client.event(Name=self._psng_event, Payload=str(c)).request()
 
-    def encode_and_compress(self, s):
-        ret_data = base64.b64encode(s)
-        ret_data = bz2.compress(ret_data)
+    def list_channels(self):
+        channel_bucket = set([])
 
-        return ret_data
+        def channel_callback(res):
+            if res.is_success:
+                line = res.body["Payload"]
+                line = line.strip()
+                tokens = line.split(',')
+                channel_bucket.add(Channel(tokens[0], tokens[1], tokens[2],
+                                           tokens[3], tokens[4]))
+        self.serf_client.stream(Type="user:"+str(self._psng_event))
+        self.serf_client.add_callback(channel_callback).request()
+        return channel_bucket
 
-    def decompress_and_decode(self, data):
-        ret_str = bz2.decompress(data)
-        ret_str = base64.b64decode(ret_str)
-
-        return ret_str
-
-    def encode(self, s):
-        ret_data = base64.b64encode(s)
-
-        return ret_data
-
-    def decode(self, data):
-        ret_str = base64.b64decode(data)
-
-        return ret_str
-
-    def get_local_ips(self):
-        ip = IPRoute()
-        local_if = ip.get_addr()
-        local_ips = []
-        for interf in local_if:
-            local_ips.append(interf.get_attr('IFA_ADDRESS'))
-
-        return local_ips
-
-    def get_members(self):
-        # Retrieve informations from all the serf memebrs.
-        # This is done through the RPC members call.
-
-        resp = None
-
-        try:
-            client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
-            client.connect()
-            client.members()
-            resp = client.request(timeout=5)
-            client.disconnect()
-        except serf._exceptions.ConnectionError:
-            print "Connection error"
-
-        return resp
-
-    def set_tag(self, tag_dict):
-        resp = None
-
-        try:
-            client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
-            client.connect()
-            client.tags(Tags=tag_dict)
-            resp = client.request()
-            client.disconnect()
-        except serf._exceptions.ConnectionError:
-            print "Connection error"
-
-        return resp
-
-    def del_tag(self, tag_names_list):
-        resp = None
-
-        try:
-            client = serf.Client("%s:%d" % (self.rpc_address, self.rpc_port))
-            client.connect()
-            client.tags(DeleteTags=tag_names_list)
-            resp = client.request()
-            client.disconnect()
-        except serf._exceptions.ConnectionError:
-            print "Connection error"
-
-        return resp
-
-    def is_local_member(self, member, local_ips):
-        if member["Addr"]:
-            m_addr = ".".join([str(x) for x in member["Addr"]])
-            if m_addr in local_ips:
-                return True
-            else:
-                return False
-        else:
-            print "Warning: found a memeber without address\n"
-            print member
-            return False
-
-    def write_db_file(self, file_name, channels_list):
-
-        file_hdr = "# channel_name,source_addr,source_port," \
-                   "channel_params,sdp_uri"
-
-        db_file = open(file_name, 'w')
-        portalocker.lock(db_file, portalocker.LOCK_EX)
-        db_file.write("%s\n" % (file_hdr,))
-        for c in channels_list:
-            print "Add channel to db: %s" % (c,)
-            db_file.write("%s\n" % (c,))
-
-        db_file.close()
-
-    def member_update_event_callback(self, resp):
-        if resp.is_success:
-            print "Received event: member-update"
-            resp_body = resp.body
-            members = resp_body["Members"]
-
-            for m in members:
-                # For now we consider only "alive" members
-                if m["Status"] == "alive":
-                    if m["Tags"]:
-                        if m["Tags"].get(self.tag_name):
-                            c_tag = m["Tags"].get(self.tag_name)
-                            if c_tag not in self.last_channels_tags_list:
-                                self.update_db_from_members()
-                                return 0
-
-            if self.last_channels_tags_list:
-                self.update_db_from_members()
-        else:
-            sys.stderr.write("Serf streamed event failed\n")
-            sys.stderr.write("%s" % (resp.error,))
-
-        return 0
-
-    def broadcast_local_sources(self, src_dbfile):
-        current = Channel.channel_from_file(src_dbfile)
-
-        # new channels not broadcasted
-        for ch in current - self.local_sources:
-            self.set_new_channel(ch.ipaddr, int(ch.port), ch.name, ch.quality,
-                                 ch.sdpuri)
-
-        # local sources not available anymore
-        for ch in self.local_sources - current:
-            self.delete_channel(ch.ipaddr, ch.port)
-
-        self.local_sources = current
-
-    def channels_sources_periodic_update(self, ch_dbfile, source_dbfile):
-        print "Available channel file: %s" % (ch_dbfile,)
-        print "Broadcasted source channel file: %s" % (source_dbfile,)
-
-        members_updated = False
+    def channel_synch(self, dbfile, source_dbfile):
         while True:
+            source_chs = Channel.channel_from_file(source_dbfile)
+            for ch in source_chs:
+                print("Adding local: " + str(ch))
+                self.broadcast_channel(*ch.to_tuple())
 
-            # Write the db file based on the current members channels tags
-            sleep_time = 5
-
-            self.client = serf.Client("%s:%d" % (self.rpc_address,
-                                      self.rpc_port),
-                                      auto_reconnect=True)
-
-            while not members_updated:
-                try:
-                    self.client.connect()
-
-                    self.ch_dbfile = ch_dbfile
-                    self.broadcast_local_sources(source_dbfile)
-                    if self.update_db_from_members():
-                        members_updated = True
-                    else:
-                        time.sleep(sleep_time)
-                except serf._exceptions.ConnectionError:
-                    print "Client connection error (sleep %d)" % (sleep_time,)
-                    time.sleep(sleep_time)
-
-            try:
-                # Register callback for memebr update events
-                # Todo: handle sigint
-                self.client.stream(Type="member-update").add_callback(
-                                   self.member_update_event_callback).request(
-                                   timeout=3)
-                self.client.disconnect()
-                members_updated = False
-            except serf._exceptions.ConnectionError:
-                print "Client connection error (sleep %d)" % (sleep_time,)
-                time.sleep(sleep_time)
-            except KeyboardInterrupt:
-                print "Disconnection from RPC deamon"
-                self.client.disconnect()
-                return
-
-    def update_db_from_members(self):
-        # WARNING: This method assumes the connection towards the RPC deamon
-        # is already open and the client seved in self.client
-
-        if not self.client:
-            return False
-
-        # Retrieve serf members
-        self.client.members()
-        resp = self.client.request(timeout=5)
-
-        if resp[0].is_success:
-            resp_body = resp[0].body
-            members = resp_body["Members"]
-
-            # Retrieve channel tags
-            self.last_channels_tags_list = []
-            channel_tags_list = []
-
-            for m in members:
-                # For now we consider only "alive" members
-                if m["Status"] == "alive":
-                    if m["Tags"]:
-                        if m["Tags"].get(self.tag_name):
-                            c_tag = m["Tags"].get(self.tag_name)
-                            channel_tags_list.append(c_tag)
-                            self.last_channels_tags_list.append(c_tag)
-
-            # Build channels list
-            channels_list = []
-
-            for t_comp in channel_tags_list:
-                # Decode the channel tag
-                t = self.decode(t_comp)
-
-                # Each member can have more than one channel.
-                # Channels are separated by the ";" character.
-                channels_list += t.split(";")
-
-            # Write database file
-            self.write_db_file(self.ch_dbfile, channels_list)
-
-            return True
-
-        else:
-            self.write_db_file(self.ch_dbfile, [])
-            sys.stderr.write("Serf members command failed\n")
-            sys.stderr.write("%s" % (resp[0].error,))
-            return False
-
-    def delete_channel(self, ch_addr, ch_port):
-        resp = self.get_members()
-
-        if not resp:
-            return
-
-        if resp[0].is_success:
-            resp_body = resp[0].body
-            members = resp_body["Members"]
-
-            # Used to save the channels tag of the local memebr
-            local_node_channels = None
-            channels_tag_exist = False
-            new_channels_string = ""
-            delete_channel = False
-
-            # find all local IP addresses and save them in local_ips
-            local_ips = self.get_local_ips()
-
-            for m in members:
-                # For now we consider only "alive" members
-                if m["Status"] == "alive":
-                    if self.is_local_member(m, local_ips):
-                        if m["Tags"]:
-                            if m["Tags"].get(self.tag_name):
-                                channels_tag_exist = True
-                            local_node_channels = m["Tags"].get(self.tag_name)
-
-            if local_node_channels:
-                # Decompress and decode the local channel and compare to the
-                # channel we want to delete
-                # The channel are compared only considering the
-                # address and the port
-                channels = self.decode(local_node_channels)
-
-                # Each member can have more than one channel.
-                # Channels are separated by the ";" character.
-                channels_list = channels.split(";")
-
-                for c in channels_list:
-                    [_, caddr, cport, _, _] = c.split(",")
-
-                    if (caddr != ch_addr or int(cport) != int(ch_port)):
-                        # This is not the channel we want to delete.
-                        # Add it to the new channels string
-                        if new_channels_string:
-                            new_channels_string += ";" + c
-                        else:
-                            new_channels_string = c
-                    else:
-                        delete_channel = True
-                        print "Delete channel: %s" % (c,)
-
-            if new_channels_string and delete_channel:
-                # If new_channels_string is not empty we just need to update
-                # the channels tag through the RPC tags -set call.
-
-                print "Update channels: %s" % (new_channels_string,)
-
-                # Encode the string
-                ch_str_comp = self.encode(new_channels_string)
-
-                # Update (or add) the channels tag.
-                # This is done through the RCP tags call
-
-                resp = self.set_tag({self.tag_name: ch_str_comp})
-
-                if not resp:
-                    return
-
-                if not resp[0].is_success:
-                    sys.stderr.write("Serf tags set command failed\n")
-                    sys.stderr.write("%s" % (resp[0].error,))
-
-            elif not new_channels_string and channels_tag_exist:
-                # If new_channels_string is empty but channels_tag_exist
-                # is True we can delete che cahnnels tag through the RPC
-                # tags -delete call
-                print "Delete tag: %s" % (self.tag_name,)
-
-                resp = self.del_tag((self.tag_name,))
-
-                if not resp:
-                    return
-
-                if not resp[0].is_success:
-                    sys.stderr.write("Serf tags delete command failed\n")
-                    sys.stderr.write("%s" % (resp[0].error,))
-
-        else:
-            sys.stderr.write("Serf members command failed\n")
-            sys.stderr.write("%s" % (resp[0].error,))
-            return
-
-    def set_new_channel(self, ch_addr, ch_port, ch_name, ch_txt, ch_sdpuri):
-        # Build new channel string
-        ch_str = '%s,%s,%d,%s,%s' % (ch_name, ch_addr, ch_port,
-                                     ch_txt, ch_sdpuri)
-        print "Add channel: %s\n" % (ch_str,)
-
-        # Retrieve informations from all the serf memebrs.
-        resp = self.get_members()
-
-        if not resp:
-            return
-
-        if resp[0].is_success:
-            resp_body = resp[0].body
-            members = resp_body["Members"]
-
-            # One encoded channels string for each "alive" member
-            nodes_channels_list = []
-            # Used to save the channels tag of the local memebr
-            local_node_channels = None
-
-            # find all local IP addresses and save them in local_ips
-            local_ips = self.get_local_ips()
-
-            for m in members:
-                # For now we consider only "alive" members
-                if m["Status"] == "alive":
-
-                    # Check if this is the local member
-                    local_member = self.is_local_member(m, local_ips)
-
-                    # Save the channels tag
-                    if m["Tags"]:
-                        node_channels = m["Tags"].get(self.tag_name)
-
-                        if node_channels:
-                            nodes_channels_list.append(node_channels)
-                            if local_member:
-                                local_node_channels = node_channels
-
-            # Don't add the new channel if it already exists
-            for channels_comp in nodes_channels_list:
-                # Dont' consider empty strings
-                if not channels_comp:
-                    continue
-
-                # Decompress and decode each channel and compare to the new
-                # channel we want to set
-                # The channel are compared only considering the
-                # address and the port
-                channels = self.decode(channels_comp)
-
-                # Each member can have more than one channel.
-                # Channels are separated by the ";" character.
-                channels_list = channels.split(";")
-
-                for c in channels_list:
-                    [_, caddr, cport, _, _] = c.split(",")
-
-                    if (caddr == ch_addr and int(cport) == int(ch_port)):
-                        print "Channel already exists"
-                        return
-
-            # If we arrive here this means that we are trying to add a new
-            # channel.
-            # Encode and compress data
-            if local_node_channels:
-                ch_str = ';'.join([self.decode(
-                                  local_node_channels),
-                                  ch_str])
-            ch_str_comp = self.encode(ch_str)
-
-            # Update (or add) the channels tag.
-            # This is done through the RCP tags call
-            resp = self.set_tag({self.tag_name: ch_str_comp})
-
-            if not resp:
-                return
-
-            if not resp[0].is_success:
-                sys.stderr.write("Serf tags command failed\n")
-                sys.stderr.write("%s" % (resp[0].error,))
-
-        else:
-            sys.stderr.write("Serf members command failed\n")
-            sys.stderr.write("%s" % (resp[0].error,))
-            return
-
-    def __str__(self):
-        ret_str = "PSNG Serf RPC client: "
-        ret_str += "{channels_tag_name: %s, " % (self.tag_name,)
-        ret_str += "rpc_address: %s, " % (self.rpc_address,)
-        ret_str += "rpc_port %d}\n" % (self.rpc_port,)
-        return ret_str
+            chs = self.list_channels()
+            db_file = open(dbfile, 'w')
+            portalocker.lock(db_file, portalocker.LOCK_EX)
+            for ch in chs.difference(source_chs):
+                print("Adding remote: " + str(ch))
+                db_file.write(str(ch) + "\n")
+            db_file.close()
 
 
 def psng_serf_client_init():
     parser = argparse.ArgumentParser()
 
-    # Optionals
-    parser.add_argument("-t", "--tagname", type=str, default="psngc",
-                        help="PeerStreamer Next-Generation source tag name",
-                        dest="tagname")
-
-    # Mandatory for all modes
-    parser.add_argument("-a", "--rpcaddress", type=str, required=True,
+    parser.add_argument("-a", "--rpcaddress", type=str, default="127.0.0.1",
                         help="IP address of the Serf RPC server",
                         dest="rpcaddress",
                         action=argparse_actions.ProperIpFormatAction)
-    parser.add_argument("-p", "--rpcport", type=int, required=True,
+    parser.add_argument("-p", "--rpcport", type=int, default=7373,
                         help="TCP port of the Serf RPC server",
                         dest="rpcport", choices=range(0, 65536),
                         metavar="[0-65535]")
@@ -541,12 +138,7 @@ def psng_serf_client_init():
     subparsers = parser.add_subparsers(dest="command")
     # Set PeerStreamer Next-Generation source tag
     parser_set = subparsers.add_parser("set", help="Set and propagate the "
-                                       "PeerStreamer Next-Generation "
-                                       "source tag (Call RPC tags --set). "
-                                       "If this node has already a "
-                                       "PeerStreamer Next-Generation source "
-                                       "tag associated, then the new channel "
-                                       "is appended to the existing ones.")
+                                       "PeerStreamer-ng channel")
     parser_set.add_argument("caddr", type=str,
                             help="Source channel IP address",
                             action=argparse_actions.ProperIpFormatAction)
@@ -560,27 +152,17 @@ def psng_serf_client_init():
     parser_set.add_argument("csdpuri", type=str,
                             help="SDP URI of the channel")
 
-    # Delete PeerStreamer Next-Generation source tag
-    parser_del = subparsers.add_parser("del", help="Delete a channel "
-                                       "identified by a source address, a "
-                                       "source port and a name. If the "
-                                       "resulting PeerStreamer "
-                                       "Next-Generation source tag is empty, "
-                                       "then it will be deleted by calling "
-                                       "the RPC procedure tags --delete.")
-    parser_del.add_argument("caddr", type=str,
-                            help="Source channel IP address",
-                            action=argparse_actions.ProperIpFormatAction)
-    parser_del.add_argument("cport", type=int, choices=range(0, 65536),
-                            help="Source channel port",
-                            metavar="[0-65535]")
-    # parser_del.add_argument("cname", type=str,
-    #                         help="Source channel name")
-
+    parser_list = subparsers.add_parser("list", help="List channels")
+    parser_list.add_argument("caddr", type=str,
+                             help="Source channel IP address",
+                             action=argparse_actions.ProperIpFormatAction)
+    parser_list.add_argument("cport", type=int, choices=range(0, 65536),
+                             help="Source channel port",
+                             metavar="[0-65535]")
     parser_db = subparsers.add_parser("bg",
                                       help="Run in background and keep the "
                                       "database file updated by listening to "
-                                      "member-update Serf events.")
+                                      "Serf events.")
     parser_db.add_argument("dbfile", type=str,
                            help="Channels database file")
     parser_db.add_argument("src_dbfile", type=str,
@@ -589,31 +171,28 @@ def psng_serf_client_init():
     try:
         args = parser.parse_args()
 
-        tag_name = args.tagname
         rpc_address = args.rpcaddress
         rpc_port = args.rpcport
 
-        serf_client = PsngSerfClient(tag_name, rpc_address, rpc_port)
-        print(serf_client)
+        client = PSngSerfClient(rpc_address, rpc_port)
+        print(client)
 
         command = args.command
         if command == "bg":
             ch_dbfile = args.dbfile
             source_dbfile = args.src_dbfile
-            serf_client.channels_sources_periodic_update(ch_dbfile,
-                                                         source_dbfile)
+            client.channel_synch(ch_dbfile, source_dbfile)
         elif command == "set":
             ch_addr = args.caddr
             ch_port = args.cport
             ch_name = args.cname
             ch_txt = args.ctxt
             ch_sdpuri = args.csdpuri
-            serf_client.set_new_channel(ch_addr, ch_port, ch_name,
-                                        ch_txt, ch_sdpuri)
-        elif command == "del":
-            ch_addr = args.caddr
-            ch_port = args.cport
-            serf_client.delete_channel(ch_addr, ch_port)
+            client.broadcast_channel(ch_addr, ch_port, ch_name, ch_txt,
+                                     ch_sdpuri)
+        elif command == "list":
+            chs = client.list_channels()
+            print(chs)
         else:
             print "Unknown mode"
             return -1
