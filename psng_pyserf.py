@@ -36,6 +36,7 @@ import argparse_actions
 import serf
 import sys
 import portalocker
+import time
 
 
 class Channel(object):
@@ -45,6 +46,7 @@ class Channel(object):
         self.name = name
         self.quality = quality
         self.sdpuri = sdpuri
+        self.creation = time.time()
 
     def __str__(self):
         return self.name + "," + self.ipaddr + "," + str(self.port) + "," + \
@@ -82,30 +84,40 @@ class Channel(object):
 
         return res
 
+    def is_recent(self, seconds):
+        return ((self.creation + seconds) > time.time())
+
 
 class PSngSerfClient(object):
     def __init__(self, rpc_addr, rpc_port):
         self.serf_client = serf.Client(rpc_addr + ":" + str(rpc_port))
         self.serf_client.handshake().request()
         self._psng_event = "PSng-channel"
+        self.channel_bucket = set([])
 
     def broadcast_channel(self, addr, port, name, txt, sdp):
         c = Channel(name, addr, port, txt, sdp)
         self.serf_client.event(Name=self._psng_event, Payload=str(c)).request()
 
     def list_channels(self):
-        channel_bucket = set([])
+        latest = set([])
 
         def channel_callback(res):
             if res.is_success:
                 line = res.body["Payload"]
                 line = line.strip()
                 tokens = line.split(',')
-                channel_bucket.add(Channel(tokens[0], tokens[1], tokens[2],
+                latest.add(Channel(tokens[0], tokens[1], tokens[2],
                                            tokens[3], tokens[4]))
         self.serf_client.stream(Type="user:"+str(self._psng_event))
         self.serf_client.add_callback(channel_callback).request()
-        return channel_bucket
+
+        for ch in self.channel_bucket.difference(latest):
+            if ch.is_recent(30):
+                latest.add(ch)
+
+        self.channel_bucket = latest
+        return self.channel_bucket
 
     def channel_synch(self, dbfile, source_dbfile):
         while True:
