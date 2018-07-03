@@ -126,6 +126,8 @@ class PSngSerfClient(object):
                 print("Adding local: " + str(ch))
                 self.broadcast_channel(*ch.to_tuple())
 
+            time.sleep(2)
+
             chs = self.list_channels()
             db_file = open(dbfile, 'w')
             portalocker.lock(db_file, portalocker.LOCK_EX)
